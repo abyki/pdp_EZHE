@@ -3,13 +3,15 @@
 #include <assert.h>
 #include <stdarg.h>
 
-#define LO(x) ((x) & 0xFF)
-#define HI(x) ((x >> 8) & 0xFF)\
+//#define LO(x) (x & 0xFF)
+//#define HI(x) ((x >> 8) & 0xFF)
 
 #define NO_PARAM 0
 #define HAS_XX 1
 #define HAS_SS (1<<1)
 #define HAS_DD (1<<2)
+#define HAS_NN (1<<3)
+#define HAS_R4 (1<<4)
 
 #define RELEASE 0
 #define DEBUG 1
@@ -17,39 +19,75 @@
 
 int debug_level = DEBUG;
 
-typedef unsigned char byte;
+typedef unsigned int byte;
 typedef int word;
-typedef int adr;
+typedef word adr;
 
-word mem[64*1024];
+byte mem[64*1024];
 
 word reg[8];
 #define sp reg[6]
 #define pc reg[7]
 
+void b_write(adr a, byte x);
+byte b_read(adr a);
+void w_write(adr a, word x);
+word w_read(adr a);
+void test_mem();
+void trace(int dbg_lvl, char * format, ...);
+void mem_dump(adr start, word n);
+void print_reg();
+void do_halt();
+void do_add();
+void do_mov();
+void do_unknown();
+void load_file();
+void run();
+struct SSDD;
+struct Command;
+struct SSDD get_mode(word w);
 
 struct SSDD {
 	word val;
 	adr a;
-} ss, dd;
+};
+
+ int R4, nn, BYTE;
+
+struct SSDD ss, dd;
 
 void b_write(adr a, byte x) {
-	mem[a] = x;
+	if (a < 8) {
+		reg[a] = (x >> 7) ? (x | 0xFF00) : x;
+	}
+	else {
+		mem[a] = x;
+	}
 }
 byte b_read(adr a) {
-	return mem[a];
+	byte x;
+	x = (a > 7) ? (mem[a]) : (reg[a]);
+	return x;
 }
 void w_write(adr a, word x) {
-	assert(a % 2 == 0);
-	mem[a] = LO(x);
-	mem[a+1] = HI(x);
+	if  (a < 8) {
+		reg[a] = x;
+	}
+	else 
+	{
+		assert(!(a % 2));
+	    mem[a] = x & 0xFF;;
+	    mem[a+1] = (x >> 8) & 0xFF;
+	}
 }
 
 word w_read(adr a) {
-	word res;
-	assert(a % 2 == 0);
-	res = (word)(mem[a]) | (word)(mem[a+1] << 8);
-	return res;
+	word x = 0;
+    if (a > 7) {
+		assert(!(a % 2));
+	}
+	x = (a > 7) ? (((x | mem[a + 1]) << 8) | mem[a]) : reg[a];
+	return x;
 		
 }
 void test_mem(){
@@ -60,15 +98,15 @@ void test_mem(){
 	w_write(4, 0x0d0c);
 	byte b4 = b_read(4);
 	byte b5 = b_read(5);
-	printf("0d0c = %hx %hx \n", b5, b4);
+	printf("0d0c = %hx %hx\n", b5, b4);
 }
 
 void trace(int dbg_lvl, char * format, ...) {
 	if (dbg_lvl != debug_level)
 		return;
 	va_list ap;
-	va_start(ap, format);
-	vprintf(format, ap);
+	va_start (ap, format);
+	vprintf (format, ap);
 	va_end(ap);
 }
 
@@ -85,26 +123,39 @@ void mem_dump(adr start, word n) {
 void print_reg() {
 	for (int i = 0; i < 8; i++) {
 		printf("R%d : %.6o ", i, reg[i]);
+		reg[i] = 0;
 	}
 }
 void do_halt() {
+	printf("\n");
 	print_reg();
-	printf("The End!!!\n");
+	printf("The End!\n");
 	exit(0);
-}
+} 
 
 void do_add() {
-	w_write(dd.a, ss.val + ss.val);
+	w_write(dd.a, ((dd.val + ss.val) & 0xFFFF));
 	return;
 }
 
 void do_mov() {
-	w_write(dd.a, ss.val);
+	w_write(dd.a, (ss.val & 0xFFFF));
 	return;
 }
 
+void do_sob() {
+	reg[R4]--;
+	if (reg[R4] != 0)
+		pc = (pc - (2 * nn)) & 0xFFFF;
+	printf("R%d\n", R4);
+}
+
+void do_clr() {
+	w_write(dd.a, 0);
+}
+
 void do_unknown() {
-	printf("WHAT A MISTAKE, DUDE?!");
+	printf("WHAT A MISTAKE, DUDE?!\n");
 	print_reg();
 	return;
 }
@@ -119,7 +170,8 @@ void load_file() {
 	unsigned int adress, n;
 	int i;
 	while (1) {
-		if (1 != fscanf(f_in, "%x%x", &adress, &n))
+		int res = fscanf(f_in, "%x%x", &adress, &n);
+		if (2 != res)
 			return;
 		for (i = 0; i < n; i++) {
 			unsigned int x;
@@ -133,18 +185,21 @@ void load_file() {
 struct Command {
 	word opcode;
 	word mask;
+	short int is_it_byte;
 	const char * name;
 	void (*do_func)();
 	byte param;
 };
 struct Command command[] = {
-	{0010000, 0170000, "mov", do_mov, HAS_SS | HAS_DD},
-	{0060000, 0170000, "add", do_add, HAS_SS | HAS_DD},
-	{0000000, 0177777, "halt", do_halt, NO_PARAM},
-	{0000000, 0170000, "unknown", do_unknown, NO_PARAM}
+	{0010000, 0170000, 0, "mov",      do_mov,     HAS_SS | HAS_DD},
+	{0060000, 0170000, 1, "add",      do_add,     HAS_SS | HAS_DD},
+	{0077000, 0177000, 0, "sob",      do_sob,     HAS_R4 | HAS_NN},
+	{0005000, 0177700, 0, "clr",      do_clr,     HAS_DD},
+	{0000000, 0177777, 0, "halt",     do_halt,    NO_PARAM},
+	{0000000, 0170000, 0, "unknown",  do_unknown, NO_PARAM}
 };
 
-struct SSDD get_mode(word w) {
+struct SSDD get_mode (word w) {
 	struct SSDD result;
 	int n = w & 7;
 	int mode = (w>>3) & 7;
@@ -156,54 +211,94 @@ struct SSDD get_mode(word w) {
 					break;
 		case 1:
 					result.a = reg[n];
-					result.val = w_read(result.a);
-					printf("R%d ", n);
+					if (BYTE) {
+						result.val = b_read(result.a);
+					}
+					else
+					{
+						result.val = w_read(result.a);
+					}
+					printf("(R%d) ", n);
 					break;
 		case 2:
 					result.a = reg[n];
-					result.val = w_read(result.a);
+					if ((BYTE)&&(n!=6)&&(n!=7)) {
+						result.val = b_read(result.a);
+					}
+					else
+					{
+						result.val = w_read(result.a);
+					}
 					if (n != 7) {
 						printf ("(R%d)+ ", n);
 					}
 					else {
 						printf(" #%o ", result.val);
 					}
-					reg[n] += 2;
+					reg[n] = ((BYTE)&&(n!=6)&&(n!=7)) ? (reg[n] + 1) : (reg[n] + 2);
 					break;
 		case 3:
 					result.a = w_read(reg[n]);
-					result.val = w_read(result.a);
+					if (BYTE) {
+						result.val = b_read(result.a);
+					}
+					else
+					{
+						result.val = w_read(result.a);
+					}
 					if (n != 7) {
 						printf ("@(R%d)+ ", n);
 					}
 					else {
-						printf(" #%o ", result.val);
+						printf(" @#%o ", result.val);
 					}
 					reg[n] += 2;
 					break;
 		case 4:
-					reg[n] -= 2;
+					reg[n] = ((BYTE)&&(n!=6)&&(n!=7)) ? (reg[n] - 1) : (reg[n] - 2);
 					result.a = reg[n];
-					result.val = w_read(result.a);
-					if (n != 7) {
-						printf ("-(R%d)+ ", n);
+					if (BYTE) {
+						result.val = b_read(result.a);
 					}
-					else {
-						printf(" #%o ", result.val);
+					else
+					{
+						result.val = w_read(result.a);
 					}
+				    printf ("-(R%d)+ ", n);
 					break;
-		case 5: 
+	    case 5: 
+	                reg[n] -= 2;
+	                result.a = w_read(reg[n]);
+	                if (BYTE) {
+						result.val = b_read(result.a);
+					}
+					else
+					{
+						result.val = w_read(result.a);
+					}
+	                printf("@-(R%d) ", n);
+	                break;    
+	    case 6: 
+		//            nn = w_read(pc);
+		  //          pc += 2;
+		            
+		            
+		            
 		
 		default: 
-					printf("I dont know T.T I'm so stupid((( \n");
+					printf("I dont know T.T, I'm so stupid((( \n");
+					exit(2);
 		}
 		return result;
 }
 
 void run() {
+	printf("\n");
+	printf("Start f-on run\n");
+	printf("\n");
 	pc = 01000;
 	while(1) {
-		word w = w_read(pc);
+		word w = w_read(pc) & 0xFFFF;
 		fprintf(stdout, "%06o: %06o ", pc, w);
 		pc += 2;
 		for (int i = 0; i < 4; i ++){
@@ -215,9 +310,13 @@ void run() {
 					ss = get_mode (w>>6);
 				if (cmd.param & HAS_DD)
 					dd = get_mode(w);
+				if (cmd.param & HAS_R4)
+					R4 = (w >> 6) & 7;
+				if (cmd.param & HAS_NN)
+					nn = w & 63;	
 				printf("\n");
 				cmd.do_func();
-				print_reg();
+				printf("\n");
 				break;
 			}
 		}
@@ -226,9 +325,11 @@ void run() {
 
 
 int main() {
-	
+	test_mem();
 	load_file();
 	mem_dump(0x200, 0xc);
+	run();
+	
 /*
     w = 0x0b0a;
 	b0 = 0xa;
